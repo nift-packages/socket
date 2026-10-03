@@ -152,12 +152,34 @@ struct(socket) {
         return 0
     }
 
+    private fn(pollfd_result(fd, timeout)) {
+        seq := []
+        le := this.le32(fd)
+        if(os() == "windows") {
+            seq.push(le[0]); seq.push(le[1]); seq.push(le[2]); seq.push(le[3])
+            seq.push(0); seq.push(0); seq.push(0); seq.push(0)
+            seq.push(5); seq.push(0)
+            seq.push(0); seq.push(0)
+            seq.push(0); seq.push(0); seq.push(0); seq.push(0)
+        } else {
+            seq.push(le[0]); seq.push(le[1]); seq.push(le[2]); seq.push(le[3])
+            seq.push(5); seq.push(0)
+            seq.push(0); seq.push(0)
+        }
+        pf := ffi_buffer(bytes(seq))
+        sym := "poll"
+        if(os() == "windows") { sym = "WSAPoll" }
+        rc := ffi_call(this.lib(), sym, "i32(buffer,i64,i32)", pf, 1, timeout)
+        if(rc < 0) { return {"readable":false,"writable":false,"error":true,"hangup":false} }
+        got := ffi_bytes(pf)
+        rv := got[6].to_int() + got[7].to_int() * 256
+        if(os() == "windows") { rv = got[10].to_int() + got[11].to_int() * 256 }
+        return {"readable":this.bit(rv,1),"writable":this.bit(rv,4),"error":this.bit(rv,8),"hangup":this.bit(rv,16)}
+    }
+
     private fn(would_block_now(fd)) {
-        pf := ffi_buffer(bytes([fd % 256, ((fd - (fd % 256)) / 256).to_int() % 256, 0, 0, 1, 0, 0, 0]))
-        rc := ffi_call(this.lib(), "poll", "i32(buffer,i64,i32)", pf, 1, 0)
-        if(rc <= 0) { return true }
-        rv := ffi_bytes(pf)
-        return rv[6] == 0 && rv[7] == 0
+        pr := this.pollfd_result(fd, 0)
+        return !pr.readable && !pr.writable && !pr.error && !pr.hangup
     }
 
     private fn(payload_bytes(data)) {
@@ -184,8 +206,14 @@ struct(socket) {
         }
         total := payload.length()
         if(total == 0) { return {"ok":true,"sent":0,"would_block":false,"error":"","error_code":""} }
+        pr := this.pollfd_result(conn.fd, 0)
+        if(!pr.writable && !pr.error && !pr.hangup) {
+            return {"ok":false,"sent":0,"would_block":true,"error":"","error_code":"would_block"}
+        }
+        sig := "i64(i64,buffer,i64,i32)"
+        if(os() == "windows") { sig = "i32(i64,buffer,i64,i32)" }
         buf := ffi_buffer(payload)
-        rc := ffi_call(this.lib(), "send", "i64(i64,buffer,i64,i32)", conn.fd, buf, total, 0)
+        rc := ffi_call(this.lib(), "send", sig, conn.fd, buf, total, 0)
         if(rc < 0) {
             if(os() == "windows") {
                 e := this.native_err()
@@ -244,13 +272,14 @@ struct(socket) {
         if(!this.valid(listener) || listener.kind != "listener") {
             return {"ok":false,"conn":null,"would_block":false,"error":"invalid listener handle","error_code":"invalid_handle"}
         }
+        pr := this.pollfd_result(listener.fd, 0)
+        if(!pr.readable && !pr.error && !pr.hangup) {
+            return {"ok":false,"conn":null,"would_block":true,"error":"","error_code":"would_block"}
+        }
         saddr := ffi_buffer(this.zeros(16))
         slen := ffi_buffer(bytes([16, 0, 0, 0, 0, 0, 0, 0]))
         fd := ffi_call(this.lib(), "accept", "i64(i64,buffer,buffer)", listener.fd, saddr, slen)
         if(fd < 0) {
-            if(this.would_block_now(listener.fd)) {
-                return {"ok":false,"conn":null,"would_block":true,"error":"","error_code":"would_block"}
-            }
             return {"ok":false,"conn":null,"would_block":false,"error":"accept failed","error_code":"socket_error"}
         }
         this.nonblock_native(fd)
@@ -292,8 +321,14 @@ struct(socket) {
             return {"ok":false,"data":null,"eof":false,"would_block":false,"error":"invalid socket handle","error_code":"invalid_handle"}
         }
         if(max <= 0) { max = 4096 }
+        pr := this.pollfd_result(conn.fd, 0)
+        if(!pr.readable && !pr.error && !pr.hangup) {
+            return {"ok":false,"data":null,"eof":false,"would_block":true,"error":"","error_code":"would_block"}
+        }
+        sig := "i64(i64,buffer,i64,i32)"
+        if(os() == "windows") { sig = "i32(i64,buffer,i64,i32)" }
         buf := ffi_buffer(this.zeros(max))
-        rc := ffi_call(this.lib(), "recv", "i64(i64,buffer,i64,i32)", conn.fd, buf, max, 0)
+        rc := ffi_call(this.lib(), "recv", sig, conn.fd, buf, max, 0)
         if(rc == 0) {
             return {"ok":true,"data":bytes(),"eof":true,"would_block":false,"error":"","error_code":""}
         }
