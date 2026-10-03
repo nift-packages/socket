@@ -152,7 +152,82 @@ struct(socket) {
         return 0
     }
 
+    private fn(winsock_fdset_bytes(fd)) {
+        arr := []
+        arr.push(1); arr.push(0); arr.push(0); arr.push(0)
+        arr.push(0); arr.push(0); arr.push(0); arr.push(0)
+        le := this.le32(fd)
+        arr.push(le[0]); arr.push(le[1]); arr.push(le[2]); arr.push(le[3])
+        arr.push(0); arr.push(0); arr.push(0); arr.push(0)
+        i := 0
+        while(i < 504) { arr.push(0); i += 1 }
+        return bytes(arr)
+    }
+
+    private fn(timeval_bytes(timeout)) {
+        sec := ((timeout - (timeout % 1000)) / 1000).to_int()
+        usec := (timeout - sec * 1000) * 1000
+        sb := this.le32(sec)
+        ub := this.le32(usec)
+        return bytes([sb[0], sb[1], sb[2], sb[3], ub[0], ub[1], ub[2], ub[3]])
+    }
+
+    private fn(winsock_ready(fd, timeout, events)) {
+        rd := ffi_buffer(this.zeros(520))
+        wr := ffi_buffer(this.zeros(520))
+        if(this.bit(events, 1)) { rd = ffi_buffer(this.winsock_fdset_bytes(fd)) }
+        if(this.bit(events, 4)) { wr = ffi_buffer(this.winsock_fdset_bytes(fd)) }
+        tv := ffi_buffer(this.timeval_bytes(timeout))
+        rc := ffi_call(this.lib(), "select", "i32(i32,buffer,buffer,buffer,buffer)", 0, rd, wr, rd, tv)
+        if(rc < 0) { return {"readable":false,"writable":false,"error":true,"hangup":false} }
+        rdg := ffi_bytes(rd)
+        wrg := ffi_bytes(wr)
+        readable := rdg[0].to_int() + rdg[1].to_int() * 256 > 0
+        writable := wrg[0].to_int() + wrg[1].to_int() * 256 > 0
+        return {"readable":readable,"writable":writable,"error":false,"hangup":false}
+    }
+
+    private fn(winsock_poll(items, timeout_ms)) {
+        n := items.size()
+        arr := []
+        arr.push(n % 256); arr.push(((n - (n % 256)) / 256).to_int() % 256); arr.push(0); arr.push(0)
+        arr.push(0); arr.push(0); arr.push(0); arr.push(0)
+        for(it : items) {
+            le := this.le32(it.fd)
+            arr.push(le[0]); arr.push(le[1]); arr.push(le[2]); arr.push(le[3])
+            arr.push(0); arr.push(0); arr.push(0); arr.push(0)
+        }
+        i := 0
+        while(i < 520 - 8 - n * 8) { arr.push(0); i += 1 }
+        rd := ffi_buffer(bytes(arr))
+        wr := ffi_buffer(this.zeros(520))
+        tv := ffi_buffer(this.timeval_bytes(timeout_ms))
+        rc := ffi_call(this.lib(), "select", "i32(i32,buffer,buffer,buffer,buffer)", 0, rd, wr, rd, tv)
+        if(rc < 0) {
+            em := "poll failed (native " + this.native_err().to_string() + ")"
+            return {"ok":false,"results":[],"error":em,"error_code":"socket_error"}
+        }
+        got := ffi_bytes(rd)
+        cnt := got[0].to_int() + got[1].to_int() * 256 + got[2].to_int() * 65536 + got[3].to_int() * 16777216
+        ready := []
+        j := 0
+        while(j < cnt) {
+            base := 8 + j * 8
+            fv := got[base].to_int() + got[base + 1].to_int() * 256 + got[base + 2].to_int() * 65536 + got[base + 3].to_int() * 16777216
+            ready.push(fv)
+            j += 1
+        }
+        results := []
+        for(it : items) {
+            readable := false
+            for(r : ready) { if(r == it.fd) { readable = true } }
+            results.push({"handle":it,"readable":readable,"writable":false,"error":false,"hangup":false})
+        }
+        return {"ok":true,"results":results,"error":"","error_code":""}
+    }
+
     private fn(pollfd_result(fd, timeout, events)) {
+        if(os() == "windows") { return this.winsock_ready(fd, timeout, events) }
         seq := []
         ev := this.le32(events)
         le := this.le32(fd)
@@ -398,46 +473,6 @@ struct(socket) {
     fn(peer_address(handle)) { return this.address_query(handle, true) }
 
 
-    private fn(winsock_poll(items, timeout_ms)) {
-        n := items.size()
-        arr := []
-        arr.push(n % 256); arr.push(((n - (n % 256)) / 256).to_int() % 256); arr.push(0); arr.push(0)
-        arr.push(0); arr.push(0); arr.push(0); arr.push(0)
-        for(it : items) {
-            le := this.le32(it.fd)
-            arr.push(le[0]); arr.push(le[1]); arr.push(le[2]); arr.push(le[3])
-            arr.push(0); arr.push(0); arr.push(0); arr.push(0)
-        }
-        i := 0
-        while(i < 520 - 8 - n * 8) { arr.push(0); i += 1 }
-        rd := ffi_buffer(bytes(arr))
-        wr := ffi_buffer(this.zeros(520))
-        tv := ffi_buffer(this.timeval_bytes(timeout_ms))
-        rc := ffi_call(this.lib(), "select", "i32(i32,buffer,buffer,buffer,buffer)", 0, rd, wr, rd, tv)
-        print("WSPDBG n=" + n.to_string() + " rc=" + rc.to_string())
-        if(rc < 0) {
-            em := "poll failed (native " + this.native_err().to_string() + ")"
-            return {"ok":false,"results":[],"error":em,"error_code":"socket_error"}
-        }
-        got := ffi_bytes(rd)
-        cnt := got[0].to_int() + got[1].to_int() * 256 + got[2].to_int() * 65536 + got[3].to_int() * 16777216
-        ready := []
-        j := 0
-        while(j < cnt) {
-            base := 8 + j * 8
-            fv := got[base].to_int() + got[base + 1].to_int() * 256 + got[base + 2].to_int() * 65536 + got[base + 3].to_int() * 16777216
-            ready.push(fv)
-            j += 1
-        }
-        results := []
-        for(it : items) {
-            readable := false
-            for(r : ready) { if(r == it.fd) { readable = true } }
-            results.push({"handle":it,"readable":readable,"writable":false,"error":false,"hangup":false})
-        }
-        return {"ok":true,"results":results,"error":"","error_code":""}
-    }
-
     fn(poll(items, timeout_ms)) {
         this.ensure_init()
         if(type(items) != "array") {
@@ -445,6 +480,7 @@ struct(socket) {
         }
         n := items.size()
         if(n == 0) { return {"ok":true,"results":[],"error":"","error_code":""} }
+        if(os() == "windows") { return this.winsock_poll(items, timeout_ms) }
         k := 0
         ok_all := true
         while(k < n) {
