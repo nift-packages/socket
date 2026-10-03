@@ -1,0 +1,420 @@
+/*
+    socket package for Nift. Cross-platform TCP sockets over the existing Nift
+    FFI (libc / libSystem / ws2_32). No Nift core change, no Python, no C shim.
+
+    Handles are plain transferable data maps ({"kind","fd","_id"}), not struct
+    facades, so they can cross worker boundaries later. All handles are created
+    non-blocking. Windows is qualified on x64 (Winsock, SOCKET is 8 bytes);
+    32-bit Windows is not certified.
+
+    Known limitation: POSIX errno is not directly readable through Nift FFI, so
+    would_block on POSIX is classified with a zero-timeout poll heuristic and
+    other errors are stable package codes.
+*/
+
+socket_lib := ""
+socket_inited := false
+socket_seq := 0
+socket_open := map()
+
+struct(socket) {
+
+    private fn(lib()) {
+        if(socket_lib == "") {
+            if(os() == "windows") { socket_lib = ffi_open("ws2_32.dll") }
+            else if(os() == "macos") { socket_lib = ffi_open("libSystem.B.dylib") }
+            else { socket_lib = ffi_open("libc.so.6") }
+        }
+        return socket_lib
+    }
+
+    private fn(ensure_init()) {
+        if(os() == "windows" && !socket_inited) {
+            wsa := ffi_buffer(this.zeros(512))
+            ffi_call(this.lib(), "WSAStartup", "i32(i32,buffer)", 514, wsa)
+            socket_inited = true
+        }
+        return null
+    }
+
+    private fn(zeros(n)) {
+        a := []
+        i := 0
+        while(i < n) { a.push(0); i += 1 }
+        return bytes(a)
+    }
+
+    private fn(le32(v)) {
+        b0 := v % 256
+        r1 := ((v - b0) / 256).to_int()
+        b1 := r1 % 256
+        r2 := ((r1 - b1) / 256).to_int()
+        b2 := r2 % 256
+        b3 := ((r2 - b2) / 256).to_int()
+        return [b0, b1, b2, b3]
+    }
+
+    private fn(high16(port)) {
+        return ((port - (port % 256)) / 256).to_int()
+    }
+
+    private fn(is_digits(s)) {
+        if(s == "") { return false }
+        i := 0
+        while(i < s.length()) {
+            c := s.substr(i, 1)
+            if(c < "0" || c > "9") { return false }
+            i += 1
+        }
+        return true
+    }
+
+    private fn(ipv4(host)) {
+        if(type(host) != "string") { return null }
+        parts := host.split(".")
+        if(parts.size() != 4) { return null }
+        out := []
+        i := 0
+        valid := true
+        while(i < 4 && valid) {
+            p := parts[i]
+            if(p == "" || !this.is_digits(p)) { valid = false }
+            else {
+                v := p.to_int()
+                if(v > 255) { valid = false }
+                else { out.push(v) }
+            }
+            i += 1
+        }
+        if(!valid) { return null }
+        return out
+    }
+
+    private fn(sockaddr4(host, port)) {
+        a := this.ipv4(host)
+        if(a == null) { return null }
+        return bytes([2, 0, this.high16(port), port % 256, a[0], a[1], a[2], a[3], 0, 0, 0, 0, 0, 0, 0, 0])
+    }
+
+    private fn(handle(kind, fd)) {
+        socket_seq += 1
+        id := socket_seq
+        socket_open.set(id, "1")
+        return {"kind":kind,"fd":fd,"_id":id}
+    }
+
+    private fn(valid(h)) {
+        if(type(h) != "object" || !h.has("kind") || !h.has("fd") || !h.has("_id")) { return false }
+        return socket_open.contains(h._id)
+    }
+
+    private fn(close_native(fd)) {
+        if(os() == "windows") { ffi_call(this.lib(), "closesocket", "i32(i64)", fd) }
+        else { ffi_call(this.lib(), "close", "i32(i64)", fd) }
+        return null
+    }
+
+    private fn(nonblock_native(fd)) {
+        if(os() == "windows") {
+            one := ffi_buffer(bytes([1, 0, 0, 0]))
+            ffi_call(this.lib(), "ioctlsocket", "i32(i64,i64,buffer)", fd, 2147772030, one)
+        } else {
+            fl := ffi_call(this.lib(), "fcntl", "i32(i64,i32)", fd, 3)
+            nb := 2048
+            if(os() == "macos") { nb = 4 }
+            ffi_call(this.lib(), "fcntl", "i32(i64,i32,i64)", fd, 4, fl + nb)
+        }
+        return null
+    }
+
+    private fn(addr_result(name_bytes)) {
+        b := ffi_bytes(name_bytes)
+        port := b[2].to_int() * 256 + b[3].to_int()
+        host := b[4].to_int().to_string() + "." + b[5].to_int().to_string() + "." + b[6].to_int().to_string() + "." + b[7].to_int().to_string()
+        return {"ok":true,"host":host,"port":port,"error":"","error_code":""}
+    }
+
+    private fn(address_query(handle, peer)) {
+        if(!this.valid(handle)) {
+            return {"ok":false,"host":"","port":0,"error":"invalid socket handle","error_code":"invalid_handle"}
+        }
+        saddr := ffi_buffer(this.zeros(16))
+        slen := ffi_buffer(bytes([16, 0, 0, 0, 0, 0, 0, 0]))
+        sym := "getsockname"
+        if(peer) { sym = "getpeername" }
+        rc := ffi_call(this.lib(), sym, "i32(i64,buffer,buffer)", handle.fd, saddr, slen)
+        if(rc != 0) { return {"ok":false,"host":"","port":0,"error":"address query failed","error_code":"socket_error"} }
+        return this.addr_result(saddr)
+    }
+
+    private fn(native_err()) {
+        if(os() == "windows") { return ffi_call(this.lib(), "WSAGetLastError", "i32()") }
+        return 0
+    }
+
+    private fn(would_block_now(fd)) {
+        pf := ffi_buffer(bytes([fd % 256, ((fd - (fd % 256)) / 256).to_int() % 256, 0, 0, 1, 0, 0, 0]))
+        rc := ffi_call(this.lib(), "poll", "i32(buffer,i64,i32)", pf, 1, 0)
+        if(rc <= 0) { return true }
+        rv := ffi_bytes(pf)
+        return rv[6] == 0 && rv[7] == 0
+    }
+
+    private fn(payload_bytes(data)) {
+        if(type(data) == "string") { return data.encode("utf-8") }
+        return data
+    }
+
+    private fn(bit(v, place)) {
+        return ((v - (v % place)) / place).to_int() % 2 == 1
+    }
+
+    private fn(bytes_slice(b, start, count)) {
+        out := []
+        i := start
+        stop := start + count
+        if(stop > b.length()) { stop = b.length() }
+        while(i < stop) { out.push(b[i]); i += 1 }
+        return bytes(out)
+    }
+
+    private fn(send_payload(conn, payload)) {
+        if(!this.valid(conn) || conn.kind != "conn") {
+            return {"ok":false,"sent":0,"would_block":false,"error":"invalid socket handle","error_code":"invalid_handle"}
+        }
+        total := payload.length()
+        if(total == 0) { return {"ok":true,"sent":0,"would_block":false,"error":"","error_code":""} }
+        buf := ffi_buffer(payload)
+        rc := ffi_call(this.lib(), "send", "i64(i64,buffer,i64,i32)", conn.fd, buf, total, 0)
+        if(rc < 0) {
+            if(os() == "windows") {
+                e := this.native_err()
+                if(e == 10035) { return {"ok":false,"sent":0,"would_block":true,"error":"","error_code":"would_block"} }
+                return {"ok":false,"sent":0,"would_block":false,"error":"send failed","error_code":"connection_reset"}
+            }
+            if(this.would_block_now(conn.fd)) {
+                return {"ok":false,"sent":0,"would_block":true,"error":"","error_code":"would_block"}
+            }
+            return {"ok":false,"sent":0,"would_block":false,"error":"send failed","error_code":"connection_reset"}
+        }
+        return {"ok":true,"sent":rc,"would_block":false,"error":"","error_code":""}
+    }
+
+
+    fn(listen(opts)) {
+        this.ensure_init()
+        l := this.lib()
+        host := "127.0.0.1"
+        port := 0
+        backlog := 16
+        if(type(opts) == "object") {
+            if(opts.has("host") && type(opts.host) == "string") { host = opts.host }
+            if(opts.has("port")) { port = opts.port }
+            if(opts.has("backlog")) { backlog = opts.backlog }
+        }
+        if(this.ipv4(host) == null) {
+            return {"ok":false,"handle":null,"port":0,"error":"invalid IPv4 host: " + host,"error_code":"invalid_address"}
+        }
+        if(port < 0 || port > 65535) {
+            return {"ok":false,"handle":null,"port":0,"error":"invalid port: " + port.to_string(),"error_code":"invalid_address"}
+        }
+        fd := ffi_call(l, "socket", "i64(i32,i32,i32)", 2, 1, 0)
+        if(fd < 0) {
+            return {"ok":false,"handle":null,"port":0,"error":"socket creation failed","error_code":"socket_error"}
+        }
+        sa := ffi_buffer(this.sockaddr4(host, port))
+        b := ffi_call(l, "bind", "i32(i64,buffer,i64)", fd, sa, 16)
+        if(b != 0) {
+            this.close_native(fd)
+            return {"ok":false,"handle":null,"port":0,"error":"bind failed","error_code":"address_in_use"}
+        }
+        lr := ffi_call(l, "listen", "i32(i64,i32)", fd, backlog)
+        if(lr != 0) {
+            this.close_native(fd)
+            return {"ok":false,"handle":null,"port":0,"error":"listen failed","error_code":"socket_error"}
+        }
+        this.nonblock_native(fd)
+        h := this.handle("listener", fd)
+        addr := this.address_query(h, false)
+        return {"ok":true,"handle":h,"port":addr.port,"error":"","error_code":""}
+    }
+
+    fn(accept(listener)) {
+        this.ensure_init()
+        if(!this.valid(listener) || listener.kind != "listener") {
+            return {"ok":false,"conn":null,"would_block":false,"error":"invalid listener handle","error_code":"invalid_handle"}
+        }
+        saddr := ffi_buffer(this.zeros(16))
+        slen := ffi_buffer(bytes([16, 0, 0, 0, 0, 0, 0, 0]))
+        fd := ffi_call(this.lib(), "accept", "i64(i64,buffer,buffer)", listener.fd, saddr, slen)
+        if(fd < 0) {
+            if(this.would_block_now(listener.fd)) {
+                return {"ok":false,"conn":null,"would_block":true,"error":"","error_code":"would_block"}
+            }
+            return {"ok":false,"conn":null,"would_block":false,"error":"accept failed","error_code":"socket_error"}
+        }
+        this.nonblock_native(fd)
+        return {"ok":true,"conn":this.handle("conn", fd),"would_block":false,"error":"","error_code":""}
+    }
+
+
+    fn(connect(opts)) {
+        this.ensure_init()
+        l := this.lib()
+        host := "127.0.0.1"
+        port := 0
+        if(type(opts) == "object") {
+            if(opts.has("host") && type(opts.host) == "string") { host = opts.host }
+            if(opts.has("port")) { port = opts.port }
+        }
+        if(this.ipv4(host) == null) {
+            return {"ok":false,"conn":null,"error":"invalid IPv4 host: " + host,"error_code":"invalid_address"}
+        }
+        if(port < 1 || port > 65535) {
+            return {"ok":false,"conn":null,"error":"invalid port","error_code":"invalid_address"}
+        }
+        fd := ffi_call(l, "socket", "i64(i32,i32,i32)", 2, 1, 0)
+        if(fd < 0) { return {"ok":false,"conn":null,"error":"socket creation failed","error_code":"socket_error"} }
+        sa := ffi_buffer(this.sockaddr4(host, port))
+        c := ffi_call(l, "connect", "i32(i64,buffer,i64)", fd, sa, 16)
+        if(c != 0) {
+            this.close_native(fd)
+            return {"ok":false,"conn":null,"error":"connection failed","error_code":"connection_refused"}
+        }
+        this.nonblock_native(fd)
+        return {"ok":true,"conn":this.handle("conn", fd),"error":"","error_code":""}
+    }
+
+
+    fn(recv(conn, max)) {
+        this.ensure_init()
+        if(!this.valid(conn) || conn.kind != "conn") {
+            return {"ok":false,"data":null,"eof":false,"would_block":false,"error":"invalid socket handle","error_code":"invalid_handle"}
+        }
+        if(max <= 0) { max = 4096 }
+        buf := ffi_buffer(this.zeros(max))
+        rc := ffi_call(this.lib(), "recv", "i64(i64,buffer,i64,i32)", conn.fd, buf, max, 0)
+        if(rc == 0) {
+            return {"ok":true,"data":bytes(),"eof":true,"would_block":false,"error":"","error_code":""}
+        }
+        if(rc < 0) {
+            if(os() == "windows") {
+                e := this.native_err()
+                if(e == 10035) { return {"ok":false,"data":null,"eof":false,"would_block":true,"error":"","error_code":"would_block"} }
+                return {"ok":false,"data":null,"eof":false,"would_block":false,"error":"recv failed","error_code":"connection_reset"}
+            }
+            if(this.would_block_now(conn.fd)) {
+                return {"ok":false,"data":null,"eof":false,"would_block":true,"error":"","error_code":"would_block"}
+            }
+            return {"ok":false,"data":null,"eof":false,"would_block":false,"error":"recv failed","error_code":"connection_reset"}
+        }
+        got := ffi_bytes(buf)
+        out := []
+        i := 0
+        while(i < rc) { out.push(got[i]); i += 1 }
+        return {"ok":true,"data":bytes(out),"eof":false,"would_block":false,"error":"","error_code":""}
+    }
+
+    fn(send(conn, data)) {
+        return this.send_payload(conn, this.payload_bytes(data))
+    }
+
+    fn(send_all(conn, data)) {
+        payload := this.payload_bytes(data)
+        total := payload.length()
+        if(total == 0) { return {"ok":true,"sent":0,"would_block":false,"error":"","error_code":""} }
+        if(!this.valid(conn) || conn.kind != "conn") {
+            return {"ok":false,"sent":0,"would_block":false,"error":"invalid socket handle","error_code":"invalid_handle"}
+        }
+        sent := 0
+        while(sent < total) {
+            r := this.send_payload(conn, this.bytes_slice(payload, sent, total - sent))
+            if(!r.ok) { return r }
+            if(r.sent <= 0) {
+                return {"ok":false,"sent":sent,"would_block":true,"error":"","error_code":"would_block"}
+            }
+            sent += r.sent
+        }
+        return {"ok":true,"sent":sent,"would_block":false,"error":"","error_code":""}
+    }
+
+    fn(shutdown(conn)) {
+        if(!this.valid(conn) || conn.kind != "conn") {
+            return {"ok":false,"error":"invalid socket handle","error_code":"invalid_handle"}
+        }
+        ffi_call(this.lib(), "shutdown", "i32(i64,i32)", conn.fd, 2)
+        return {"ok":true,"error":"","error_code":""}
+    }
+
+    fn(close(handle)) {
+        if(!this.valid(handle)) {
+            return {"ok":false,"error":"invalid socket handle","error_code":"invalid_handle"}
+        }
+        this.close_native(handle.fd)
+        socket_open.remove(handle._id)
+        return {"ok":true,"error":"","error_code":""}
+    }
+
+
+    fn(local_address(handle)) { return this.address_query(handle, false) }
+    fn(peer_address(handle)) { return this.address_query(handle, true) }
+
+
+    fn(poll(items, timeout_ms)) {
+        this.ensure_init()
+        if(type(items) != "array") {
+            return {"ok":false,"results":[],"error":"poll requires an array of handles","error_code":"invalid_argument"}
+        }
+        n := items.size()
+        if(n == 0) { return {"ok":true,"results":[],"error":"","error_code":""} }
+        k := 0
+        ok_all := true
+        while(k < n) {
+            if(!this.valid(items[k])) { ok_all = false }
+            k += 1
+        }
+        if(!ok_all) {
+            return {"ok":false,"results":[],"error":"poll received an invalid handle","error_code":"invalid_handle"}
+        }
+        seq := []
+        for(it : items) {
+            if(os() == "windows") {
+                le := this.le32(it.fd)
+                seq.push(le[0]); seq.push(le[1]); seq.push(le[2]); seq.push(le[3])
+                seq.push(0); seq.push(0); seq.push(0); seq.push(0)
+                seq.push(5); seq.push(0)
+                seq.push(0); seq.push(0)
+                seq.push(0); seq.push(0); seq.push(0); seq.push(0)
+            } else {
+                le := this.le32(it.fd)
+                seq.push(le[0]); seq.push(le[1]); seq.push(le[2]); seq.push(le[3])
+                seq.push(5); seq.push(0)
+                seq.push(0); seq.push(0)
+            }
+        }
+        buf := ffi_buffer(bytes(seq))
+        sym := "poll"
+        if(os() == "windows") { sym = "WSAPoll" }
+        rc := ffi_call(this.lib(), sym, "i32(buffer,i64,i32)", buf, n, timeout_ms)
+        if(rc < 0) { return {"ok":false,"results":[],"error":"poll failed","error_code":"socket_error"} }
+        got := ffi_bytes(buf)
+        results := []
+        i := 0
+        while(i < n) {
+            base := i * 16
+            if(os() != "windows") { base = i * 8 }
+            rv := got[base + 6].to_int() + got[base + 7].to_int() * 256
+            if(os() == "windows") { rv = got[base + 10].to_int() + got[base + 11].to_int() * 256 }
+            readable := this.bit(rv, 1)
+            writable := this.bit(rv, 4)
+            err := this.bit(rv, 8)
+            hangup := this.bit(rv, 16)
+            results.push({"handle":items[i],"readable":readable,"writable":writable,"error":err,"hangup":hangup})
+            i += 1
+        }
+        return {"ok":true,"results":results,"error":"","error_code":""}
+    }
+}
+
+socket := socket()
+export(socket)

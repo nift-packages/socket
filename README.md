@@ -1,0 +1,107 @@
+# socket
+
+Cross-platform TCP sockets for Nift, implemented entirely over the existing
+Nift FFI (`libc` / `libSystem` / `ws2_32`). No Nift core change, no Python, no
+C shim. This is the transport foundation for the Python-free HTTP server
+(SERVER1 of the server campaign); it is also independently usable.
+
+## Status
+
+- **Supported platforms:** Linux, macOS, Windows **x64** (Winsock). 32-bit
+  Windows is not certified.
+- **IPv4 only.** IPv6 (`sockaddr_in6`) and DNS hostname resolution are not yet
+  implemented; hosts must be numeric IPv4 (`"127.0.0.1"`, `"192.168.1.5"`).
+- **TCP only.** No UDP, no TLS. Do not claim TLS or UDP.
+- **Non-blocking by default.** Every listener/connection handle is created
+  non-blocking and is consumed through the `poll` event-loop model.
+- **Binary-safe.** `recv` returns a Nift `bytes` value; embedded NUL, `0xff`
+  and multibyte bytes round-trip exactly. Network payloads never use
+  NUL-terminated or text semantics.
+
+## API
+
+```text
+listener := socket.listen({"host": "127.0.0.1", "port": 0})
+conn := socket.connect({"host": "127.0.0.1", "port": listener.port})
+accepted := socket.accept(listener)
+
+r := socket.recv(conn, 4096)        // {ok, data, eof, would_block, error_code, error}
+socket.send(conn, data)             // {ok, sent, would_block, ...}; partial sends
+socket.send_all(conn, data)         // loops partial sends; {ok, sent, would_block, ...}
+
+socket.poll([listener, conn], timeout_ms)   // [{handle, readable, writable, error, hangup}]
+socket.local_address(handle)        // {ok, host, port}
+socket.peer_address(handle)
+socket.shutdown(conn)
+socket.close(handle)
+```
+
+Handles are plain transferable data maps (`{kind, fd, _id}`), not struct
+facades, so they can cross worker boundaries in a later event loop.
+
+`recv` result contract:
+
+```text
+ok: true,  data: bytes, eof: false      // read of max bytes (or fewer)
+ok: true,  data: bytes(), eof: true      // peer closed (0-byte read)
+ok: false, would_block: true             // nothing available right now
+ok: false, error_code: connection_reset / invalid_handle / ...
+```
+
+## Error model
+
+POSIX `errno` is not directly readable through Nift FFI, so the package emits
+stable outcomes instead of raw errno:
+
+```text
+address_in_use, connection_refused, connection_reset, would_block,
+invalid_address, invalid_handle, socket_error
+```
+
+On Windows, `WSAGetLastError()` is consulted internally (`WSAEWOULDBLOCK`
+→ `would_block`). On POSIX, `would_block` is classified with a zero-timeout
+`poll` heuristic when a non-blocking read/write has nothing pending.
+
+## Poll layout
+
+`poll()` uses the platform-native struct. These are **not** interchangeable:
+
+```text
+POSIX pollfd (8 bytes on LP64):
+    int   fd        offset 0
+    short events    offset 4
+    short revents   offset 6
+
+Windows WSAPOLLFD (16 bytes on x64):
+    SOCKET fd       offset 0   (UINT_PTR, 8 bytes)
+    SHORT events    offset 8
+    SHORT revents   offset 10
+```
+
+The WSAPOLLFD layout was pinned by a hosted Windows test before use.
+
+## Lifecycle
+
+- `socket.close(handle)` closes the native descriptor and deregisters the
+  handle; a second close (or any use of a closed handle) returns
+  `invalid_handle`.
+- On Windows, `WSAStartup` runs once at first use (process-lifetime
+  initialization) and `WSACleanup` is never called, so no cleanup race can
+  close live sockets. `closesocket` (not C runtime `close`) is used.
+- Bind failures, connect failures and early returns close the native
+  descriptor before returning.
+
+## Known limitations
+
+- POSIX `errno` values are not surfaced (see error model); some errors collapse
+  to `socket_error`.
+- DNS hostnames are not resolved; hosts must be numeric IPv4.
+- IPv6 is not implemented.
+
+## Tests
+
+`tests/socket_test.py` (self-contained, loopback only, no public network) runs
+listener/client basics, binary roundtrip, addresses, non-blocking `would_block`,
+`poll` readiness, EOF, invalid handles / double close, bind conflict, connect
+refused, and a 40-iteration open/close stress loop. Python is used by the test
+harness only; the production package is pure Nift FFI.
