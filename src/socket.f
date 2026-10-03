@@ -414,6 +414,7 @@ struct(socket) {
         wr := ffi_buffer(this.zeros(520))
         tv := ffi_buffer(this.timeval_bytes(timeout_ms))
         rc := ffi_call(this.lib(), "select", "i32(i32,buffer,buffer,buffer,buffer)", 0, rd, wr, rd, tv)
+        print("WSPDBG n=" + n.to_string() + " rc=" + rc.to_string())
         if(rc < 0) {
             em := "poll failed (native " + this.native_err().to_string() + ")"
             return {"ok":false,"results":[],"error":em,"error_code":"socket_error"}
