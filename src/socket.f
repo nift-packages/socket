@@ -434,7 +434,8 @@ struct(socket) {
         if(rc < 0) {
             e := 0
             if(os() == "windows") { e = this.native_err() }
-            return {"ok":false,"results":[],"error":"poll failed (native " + e.to_string() + ")","error_code":"socket_error"}
+            em := "poll failed (native " + e.to_string() + ")"
+            return {"ok":false,"results":[],"error":em,"error_code":"socket_error"}
         }
         got := ffi_bytes(buf)
         results := []
