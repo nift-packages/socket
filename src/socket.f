@@ -548,3 +548,22 @@ struct(socket) {
 
 socket := socket()
 export(socket)
+
+// Top-level wrappers: struct facades from another package are not reachable
+// inside importing package functions, so expose the core operations here.
+fn(sock_listen(opts)) { return socket.listen(opts) }
+fn(sock_accept(listener)) { return socket.accept(listener) }
+fn(sock_recv(conn, max)) { return socket.recv(conn, max) }
+fn(sock_send_all(conn, data)) { return socket.send_all(conn, data) }
+fn(sock_close(handle)) { return socket.close(handle) }
+fn(sock_peer_address(handle)) { return socket.peer_address(handle) }
+fn(sock_poll(items, timeout)) { return socket.poll(items, timeout) }
+fn(sock_available()) { return true }
+export(sock_listen)
+export(sock_accept)
+export(sock_recv)
+export(sock_send_all)
+export(sock_close)
+export(sock_peer_address)
+export(sock_poll)
+export(sock_available)
