@@ -152,21 +152,24 @@ struct(socket) {
         return 0
     }
 
-    private fn(pollfd_result(fd, timeout)) {
+    private fn(pollfd_result(fd, timeout, events)) {
         seq := []
+        ev := this.le32(events)
         le := this.le32(fd)
         if(os() == "windows") {
             seq.push(le[0]); seq.push(le[1]); seq.push(le[2]); seq.push(le[3])
             seq.push(0); seq.push(0); seq.push(0); seq.push(0)
-            seq.push(1); seq.push(0)
+            seq.push(ev[0]); seq.push(ev[1])
             seq.push(0); seq.push(0)
             seq.push(0); seq.push(0); seq.push(0); seq.push(0)
         } else {
             seq.push(le[0]); seq.push(le[1]); seq.push(le[2]); seq.push(le[3])
-            seq.push(1); seq.push(0)
+            seq.push(ev[0]); seq.push(ev[1])
             seq.push(0); seq.push(0)
         }
         pf := ffi_buffer(bytes(seq))
+        sq := ""
+        for(x : seq) { sq = sq + x.to_string() + "," }
         sym := "poll"
         if(os() == "windows") { sym = "WSAPoll" }
         rc := ffi_call(this.lib(), sym, "i32(buffer,i64,i32)", pf, 1, timeout)
@@ -178,7 +181,7 @@ struct(socket) {
     }
 
     private fn(would_block_now(fd)) {
-        pr := this.pollfd_result(fd, 0)
+        pr := this.pollfd_result(fd, 0, 1)
         return !pr.readable && !pr.writable && !pr.error && !pr.hangup
     }
 
@@ -206,7 +209,7 @@ struct(socket) {
         }
         total := payload.length()
         if(total == 0) { return {"ok":true,"sent":0,"would_block":false,"error":"","error_code":""} }
-        pr := this.pollfd_result(conn.fd, 0)
+        pr := this.pollfd_result(conn.fd, 0, 4)
         if(!pr.writable && !pr.error && !pr.hangup) {
             return {"ok":false,"sent":0,"would_block":true,"error":"","error_code":"would_block"}
         }
@@ -272,7 +275,7 @@ struct(socket) {
         if(!this.valid(listener) || listener.kind != "listener") {
             return {"ok":false,"conn":null,"would_block":false,"error":"invalid listener handle","error_code":"invalid_handle"}
         }
-        pr := this.pollfd_result(listener.fd, 0)
+        pr := this.pollfd_result(listener.fd, 0, 1)
         if(!pr.readable && !pr.error && !pr.hangup) {
             return {"ok":false,"conn":null,"would_block":true,"error":"","error_code":"would_block"}
         }
@@ -321,7 +324,7 @@ struct(socket) {
             return {"ok":false,"data":null,"eof":false,"would_block":false,"error":"invalid socket handle","error_code":"invalid_handle"}
         }
         if(max <= 0) { max = 4096 }
-        pr := this.pollfd_result(conn.fd, 0)
+        pr := this.pollfd_result(conn.fd, 0, 1)
         if(!pr.readable && !pr.error && !pr.hangup) {
             return {"ok":false,"data":null,"eof":false,"would_block":true,"error":"","error_code":"would_block"}
         }
