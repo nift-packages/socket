@@ -166,7 +166,7 @@ struct(socket) {
         sol := 1
         soerr := 4
         if(os() == "windows") { sol = 65535; soerr = 4103 }
-        else if(os() == "macos") { sol = 65535 }
+        else if(os() == "macos") { sol = 65535; soerr = 7 }
         ffi_call(this.lib(), "getsockopt", "i32(i64,i32,i32,buffer,buffer)", fd, sol, soerr, opt, slen)
         og := ffi_bytes(opt)
         return og[0].to_int() + og[1].to_int() * 256
