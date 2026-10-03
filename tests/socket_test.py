@@ -124,6 +124,7 @@ l := socket.listen({"host": "127.0.0.1", "port": 0})
 p0 := socket.poll([l.handle], 0)
 print(p0.ok)
 print(p0.results.size())
+print(p0.error)
 c := socket.connect({"host": "127.0.0.1", "port": l.port})
 p1 := socket.poll([l.handle], 500)
 print(p1.results[0].readable)
@@ -137,8 +138,8 @@ socket.close(a.conn)
 socket.close(l.handle)
 """)
 lines = out.stdout.strip().splitlines()
-check("poll readiness", len(lines) == 5 and lines[0] == "true" and lines[1] == "1"
-      and lines[2] == "true" and lines[3] == "true" and lines[4] == "data", out.stdout + out.stderr)
+check("poll readiness", len(lines) == 6 and lines[0] == "true" and lines[1] == "1" and lines[2] == ""
+      and lines[3] == "true" and lines[4] == "true" and lines[5] == "data", out.stdout + out.stderr)
 
 # ---- EOF --------------------------------------------------------------------
 out = run("t6.f", """
