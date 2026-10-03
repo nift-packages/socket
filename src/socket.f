@@ -431,7 +431,11 @@ struct(socket) {
         sym := "poll"
         if(os() == "windows") { sym = "WSAPoll" }
         rc := ffi_call(this.lib(), sym, "i32(buffer,i64,i32)", buf, n, timeout_ms)
-        if(rc < 0) { return {"ok":false,"results":[],"error":"poll failed","error_code":"socket_error"} }
+        if(rc < 0) {
+            e := 0
+            if(os() == "windows") { e = this.native_err() }
+            return {"ok":false,"results":[],"error":"poll failed (native " + e.to_string() + ")","error_code":"socket_error"}
+        }
         got := ffi_bytes(buf)
         results := []
         i := 0
