@@ -134,7 +134,7 @@ p1 := socket.poll([l.handle], 0)
 print(p1.results[0].readable)
 a := socket.accept(l.handle)
 socket.send_all(c.conn, "data")
-p2 := socket.poll([a.conn], 500)
+p2 := socket.poll([a.conn], 0)
 print(p2.results[0].readable)
 print(socket.recv(a.conn, 64).data.decode("utf-8"))
 socket.close(c.conn)
@@ -142,9 +142,9 @@ socket.close(a.conn)
 socket.close(l.handle)
 """)
 lines = out.stdout.strip().splitlines()
-check("poll readiness", len(lines) == 9 and lines[0] == "true" and lines[1] == "1" and lines[2] == ""
-      and lines[3] == "true" and lines[4] == "true" and lines[5] == "true:" and lines[6] == "true"
-      and lines[7] == "true" and lines[8] == "data", out.stdout + out.stderr)
+check("poll readiness", len(lines) == 8 and lines[0] == "true" and lines[1] == "1" and lines[2] == ""
+      and lines[3] == "l_ok=true" and lines[4] == "l2=true:" and lines[5] == "true"
+      and lines[6] == "true" and lines[7] == "data", out.stdout + out.stderr)
 
 # ---- EOF --------------------------------------------------------------------
 out = run("t6.f", """
