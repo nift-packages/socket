@@ -14,9 +14,11 @@ C shim. This is the transport foundation for the Python-free HTTP server
 - **TCP only.** No UDP, no TLS. Do not claim TLS or UDP.
 - **Non-blocking by default.** Every listener/connection handle is created
   non-blocking and is consumed through the `poll` event-loop model.
-  `connect` is also non-blocking: it completes asynchronously and resolves via
-  `poll` writability plus `SO_ERROR`, so it cannot hang the process (default
-  30 s connect timeout, `timeout` option in milliseconds).
+- **`connect` is a blocking call** (the only one): it completes the TCP
+  handshake synchronously and can block until the peer accepts or the OS
+  connect timeout. This is acceptable for SERVER1 because the server side
+  (listen/accept/recv/send) never calls connect; a future non-blocking connect
+  can resolve completion via poll writability + `getpeername`/`SO_ERROR`.
 - **Binary-safe.** `recv` returns a Nift `bytes` value; embedded NUL, `0xff`
   and multibyte bytes round-trip exactly. Network payloads never use
   NUL-terminated or text semantics.

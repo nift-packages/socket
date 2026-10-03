@@ -160,17 +160,6 @@ struct(socket) {
         return 0
     }
 
-    private fn(socket_error(fd)) {
-        opt := ffi_buffer(bytes([0, 0, 0, 0]))
-        slen := ffi_buffer(bytes([4, 0, 0, 0, 0, 0, 0, 0]))
-        sol := 1
-        soerr := 4
-        if(os() == "windows") { sol = 65535; soerr = 4103 }
-        else if(os() == "macos") { sol = 65535; soerr = 7 }
-        ffi_call(this.lib(), "getsockopt", "i32(i64,i32,i32,buffer,buffer)", fd, sol, soerr, opt, slen)
-        og := ffi_bytes(opt)
-        return og[0].to_int() + og[1].to_int() * 256
-    }
 
     private fn(winsock_fdset_bytes(fd)) {
         arr := []
@@ -415,22 +404,13 @@ struct(socket) {
         }
         fd := ffi_call(l, "socket", "i64(i32,i32,i32)", 2, 1, 0)
         if(fd < 0) { return {"ok":false,"conn":null,"error":"socket creation failed","error_code":"socket_error"} }
-        this.nonblock_native(fd)
         sa := ffi_buffer(this.sockaddr4(host, port))
         c := ffi_call(l, "connect", "i32(i64,buffer,i64)", fd, sa, 16)
         if(c != 0) {
-            timeout := 30000
-            if(type(opts) == "object" && opts.has("timeout")) { timeout = opts.timeout }
-            pr := this.pollfd_result(fd, timeout, 4)
-            if(!pr.writable && !pr.error && !pr.hangup) {
-                this.close_native(fd)
-                return {"ok":false,"conn":null,"error":"connection timed out","error_code":"connection_refused"}
-            }
-            if(this.socket_error(fd) != 0) {
-                this.close_native(fd)
-                return {"ok":false,"conn":null,"error":"connection failed","error_code":"connection_refused"}
-            }
+            this.close_native(fd)
+            return {"ok":false,"conn":null,"error":"connection failed","error_code":"connection_refused"}
         }
+        this.nonblock_native(fd)
         return {"ok":true,"conn":this.handle("conn", fd),"error":"","error_code":""}
     }
 
