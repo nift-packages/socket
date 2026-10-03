@@ -94,23 +94,6 @@ limited to 64 handles per call on Windows (FD_SETSIZE).
 - DNS hostnames are not resolved; hosts must be numeric IPv4.
 - IPv6 is not implemented.
 
-## Top-level wrappers (cross-package use)
-
-Struct facades from one package are not reachable inside another package's
-functions in Nift, so the socket package also exports self-contained top-level
-functions that any package can import and call:
-
-```text
-sock_listen(opts) / sock_accept(listener) / sock_connect(opts)
-sock_recv(conn, max) / sock_send(conn, data) / sock_send_all(conn, data)
-sock_shutdown(conn) / sock_close(handle)
-sock_local_address(handle) / sock_peer_address(handle)
-sock_poll(items, timeout_ms) / sock_available()
-```
-
-These are the cross-package transport API (the `socket` facade remains for
-in-script use); e.g. the `http` package native backend uses `sock_*`.
-
 ## Tests
 
 `tests/socket_test.py` (self-contained, loopback only, no public network) runs
