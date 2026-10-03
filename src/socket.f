@@ -158,12 +158,12 @@ struct(socket) {
         if(os() == "windows") {
             seq.push(le[0]); seq.push(le[1]); seq.push(le[2]); seq.push(le[3])
             seq.push(0); seq.push(0); seq.push(0); seq.push(0)
-            seq.push(5); seq.push(0)
+            seq.push(1); seq.push(0)
             seq.push(0); seq.push(0)
             seq.push(0); seq.push(0); seq.push(0); seq.push(0)
         } else {
             seq.push(le[0]); seq.push(le[1]); seq.push(le[2]); seq.push(le[3])
-            seq.push(5); seq.push(0)
+            seq.push(1); seq.push(0)
             seq.push(0); seq.push(0)
         }
         pf := ffi_buffer(bytes(seq))
@@ -417,13 +417,13 @@ struct(socket) {
                 le := this.le32(it.fd)
                 seq.push(le[0]); seq.push(le[1]); seq.push(le[2]); seq.push(le[3])
                 seq.push(0); seq.push(0); seq.push(0); seq.push(0)
-                seq.push(5); seq.push(0)
+                seq.push(1); seq.push(0)
                 seq.push(0); seq.push(0)
                 seq.push(0); seq.push(0); seq.push(0); seq.push(0)
             } else {
                 le := this.le32(it.fd)
                 seq.push(le[0]); seq.push(le[1]); seq.push(le[2]); seq.push(le[3])
-                seq.push(5); seq.push(0)
+                seq.push(1); seq.push(0)
                 seq.push(0); seq.push(0)
             }
         }
