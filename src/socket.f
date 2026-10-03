@@ -398,6 +398,45 @@ struct(socket) {
     fn(peer_address(handle)) { return this.address_query(handle, true) }
 
 
+    private fn(winsock_poll(items, timeout_ms)) {
+        n := items.size()
+        arr := []
+        arr.push(n % 256); arr.push(((n - (n % 256)) / 256).to_int() % 256); arr.push(0); arr.push(0)
+        arr.push(0); arr.push(0); arr.push(0); arr.push(0)
+        for(it : items) {
+            le := this.le32(it.fd)
+            arr.push(le[0]); arr.push(le[1]); arr.push(le[2]); arr.push(le[3])
+            arr.push(0); arr.push(0); arr.push(0); arr.push(0)
+        }
+        i := 0
+        while(i < 520 - 8 - n * 8) { arr.push(0); i += 1 }
+        rd := ffi_buffer(bytes(arr))
+        wr := ffi_buffer(this.zeros(520))
+        tv := ffi_buffer(this.timeval_bytes(timeout_ms))
+        rc := ffi_call(this.lib(), "select", "i32(i32,buffer,buffer,buffer,buffer)", 0, rd, wr, rd, tv)
+        if(rc < 0) {
+            em := "poll failed (native " + this.native_err().to_string() + ")"
+            return {"ok":false,"results":[],"error":em,"error_code":"socket_error"}
+        }
+        got := ffi_bytes(rd)
+        cnt := got[0].to_int() + got[1].to_int() * 256 + got[2].to_int() * 65536 + got[3].to_int() * 16777216
+        ready := []
+        j := 0
+        while(j < cnt) {
+            base := 8 + j * 8
+            fv := got[base].to_int() + got[base + 1].to_int() * 256 + got[base + 2].to_int() * 65536 + got[base + 3].to_int() * 16777216
+            ready.push(fv)
+            j += 1
+        }
+        results := []
+        for(it : items) {
+            readable := false
+            for(r : ready) { if(r == it.fd) { readable = true } }
+            results.push({"handle":it,"readable":readable,"writable":false,"error":false,"hangup":false})
+        }
+        return {"ok":true,"results":results,"error":"","error_code":""}
+    }
+
     fn(poll(items, timeout_ms)) {
         this.ensure_init()
         if(type(items) != "array") {
