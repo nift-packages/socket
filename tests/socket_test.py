@@ -71,6 +71,14 @@ a := socket.accept(l.handle)
 payload := bytes([0, 255, 10, 13, 65, 66, 128, 254])
 print(socket.send_all(c.conn, payload).ok)
 r := socket.recv(a.conn, 64)
+big := []
+bi := 0
+while(bi < 16384) { big.push(bi % 256); bi += 1 }
+bigb := bytes(big)
+print(socket.send_all(c.conn, bigb).ok)
+rb := socket.recv(a.conn, 65536)
+print(rb.ok)
+print(rb.data.length())
 print(r.ok)
 print(r.data.length())
 print(r.data[0])
@@ -81,7 +89,9 @@ socket.close(a.conn)
 socket.close(l.handle)
 """)
 lines = out.stdout.strip().splitlines()
-check("binary roundtrip exact", lines == ["true", "true", "8", "0", "255", "254"], out.stdout + out.stderr)
+check("binary roundtrip exact", len(lines) == 9 and lines[0] == "true" and lines[1] == "true"
+      and lines[2] == "true" and lines[3] == "16384" and lines[4] == "true" and lines[5] == "8"
+      and lines[6] == "0" and lines[7] == "255" and lines[8] == "254", out.stdout + out.stderr)
 
 # ---- local/peer address ------------------------------------------------------
 out = run("t3.f", """
@@ -129,7 +139,7 @@ c := socket.connect({"host": "127.0.0.1", "port": l.port})
 print("l_ok=" + socket.local_address(l.handle).ok.to_string())
 l2 := socket.listen({"host": "127.0.0.1", "port": 0})
 p2b := socket.poll([l2.handle], 0)
-print("l2=" + p2b.ok.to_string() + ":" + p2b.error)
+print("l2=" + p2b.ok.to_string() + ":" + p2b.error + ":" + p2b.results[0].readable.to_string())
 p1 := socket.poll([l.handle], 0)
 print(p1.results[0].readable)
 a := socket.accept(l.handle)
@@ -143,7 +153,7 @@ socket.close(l.handle)
 """)
 lines = out.stdout.strip().splitlines()
 check("poll readiness", len(lines) == 8 and lines[0] == "true" and lines[1] == "1" and lines[2] == ""
-      and lines[3] == "l_ok=true" and lines[4] == "l2=true:" and lines[5] == "true"
+      and lines[3] == "l_ok=true" and lines[4] == "l2=true::false" and lines[5] == "true"
       and lines[6] == "true" and lines[7] == "data", out.stdout + out.stderr)
 
 # ---- EOF --------------------------------------------------------------------

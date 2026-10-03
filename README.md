@@ -14,6 +14,9 @@ C shim. This is the transport foundation for the Python-free HTTP server
 - **TCP only.** No UDP, no TLS. Do not claim TLS or UDP.
 - **Non-blocking by default.** Every listener/connection handle is created
   non-blocking and is consumed through the `poll` event-loop model.
+  `connect` is also non-blocking: it completes asynchronously and resolves via
+  `poll` writability plus `SO_ERROR`, so it cannot hang the process (default
+  30 s connect timeout, `timeout` option in milliseconds).
 - **Binary-safe.** `recv` returns a Nift `bytes` value; embedded NUL, `0xff`
   and multibyte bytes round-trip exactly. Network payloads never use
   NUL-terminated or text semantics.
@@ -30,6 +33,7 @@ socket.send(conn, data)             // {ok, sent, would_block, ...}; partial sen
 socket.send_all(conn, data)         // loops partial sends; {ok, sent, would_block, ...}
 
 socket.poll([listener, conn], timeout_ms)   // [{handle, readable, writable, error, hangup}]
+                                              // writable is reported (POLLIN|POLLOUT)
 socket.local_address(handle)        // {ok, host, port}
 socket.peer_address(handle)
 socket.shutdown(conn)
@@ -64,21 +68,11 @@ On Windows, `WSAGetLastError()` is consulted internally (`WSAEWOULDBLOCK`
 
 ## Poll layout
 
-`poll()` uses the platform-native struct. These are **not** interchangeable:
-
-```text
-POSIX pollfd (8 bytes on LP64):
-    int   fd        offset 0
-    short events    offset 4
-    short revents   offset 6
-
-Windows WSAPOLLFD (16 bytes on x64):
-    SOCKET fd       offset 0   (UINT_PTR, 8 bytes)
-    SHORT events    offset 8
-    SHORT revents   offset 10
-```
-
-The WSAPOLLFD layout was pinned by a hosted Windows test before use.
+`poll()` uses the platform-native readiness primitive. On POSIX it builds the
+native `struct pollfd` (`int fd` / `short events` / `short revents`, 8 bytes on
+LP64). On Windows it uses Winsock `select()` over a manually-built `fd_set`
+(fd_count + 8-byte `SOCKET` array) rather than `WSAPoll`, and `socket.poll` is
+limited to 64 handles per call on Windows (FD_SETSIZE).
 
 ## Lifecycle
 

@@ -14,6 +14,7 @@
 
 socket_lib := ""
 socket_inited := false
+socket_init_ok := true
 socket_seq := 0
 socket_open := map()
 
@@ -31,8 +32,9 @@ struct(socket) {
     private fn(ensure_init()) {
         if(os() == "windows" && !socket_inited) {
             wsa := ffi_buffer(this.zeros(512))
-            ffi_call(this.lib(), "WSAStartup", "i32(i32,buffer)", 514, wsa)
+            rc := ffi_call(this.lib(), "WSAStartup", "i32(i32,buffer)", 514, wsa)
             socket_inited = true
+            if(rc != 0) { socket_init_ok = false }
         }
         return null
     }
@@ -52,6 +54,12 @@ struct(socket) {
         b2 := r2 % 256
         b3 := ((r2 - b2) / 256).to_int()
         return [b0, b1, b2, b3]
+    }
+
+    private fn(le64(v)) {
+        lo := this.le32(v)
+        hi := this.le32(((v - (lo[0] + lo[1] * 256 + lo[2] * 65536 + lo[3] * 16777216)) / 4294967296).to_int())
+        return [lo[0], lo[1], lo[2], lo[3], hi[0], hi[1], hi[2], hi[3]]
     }
 
     private fn(high16(port)) {
@@ -152,13 +160,24 @@ struct(socket) {
         return 0
     }
 
+    private fn(socket_error(fd)) {
+        opt := ffi_buffer(bytes([0, 0, 0, 0]))
+        slen := ffi_buffer(bytes([4, 0, 0, 0, 0, 0, 0, 0]))
+        sol := 1
+        soerr := 4
+        if(os() == "windows") { sol = 65535; soerr = 4103 }
+        ffi_call(this.lib(), "getsockopt", "i32(i64,i32,i32,buffer,buffer)", fd, sol, soerr, opt, slen)
+        og := ffi_bytes(opt)
+        return og[0].to_int() + og[1].to_int() * 256
+    }
+
     private fn(winsock_fdset_bytes(fd)) {
         arr := []
         arr.push(1); arr.push(0); arr.push(0); arr.push(0)
         arr.push(0); arr.push(0); arr.push(0); arr.push(0)
-        le := this.le32(fd)
+        le := this.le64(fd)
         arr.push(le[0]); arr.push(le[1]); arr.push(le[2]); arr.push(le[3])
-        arr.push(0); arr.push(0); arr.push(0); arr.push(0)
+        arr.push(le[4]); arr.push(le[5]); arr.push(le[6]); arr.push(le[7])
         i := 0
         while(i < 504) { arr.push(0); i += 1 }
         return bytes(arr)
@@ -175,10 +194,11 @@ struct(socket) {
     private fn(winsock_ready(fd, timeout, events)) {
         rd := ffi_buffer(this.zeros(520))
         wr := ffi_buffer(this.zeros(520))
+        ex := ffi_buffer(this.zeros(520))
         if(this.bit(events, 1)) { rd = ffi_buffer(this.winsock_fdset_bytes(fd)) }
         if(this.bit(events, 4)) { wr = ffi_buffer(this.winsock_fdset_bytes(fd)) }
         tv := ffi_buffer(this.timeval_bytes(timeout))
-        rc := ffi_call(this.lib(), "select", "i32(i32,buffer,buffer,buffer,buffer)", 0, rd, wr, rd, tv)
+        rc := ffi_call(this.lib(), "select", "i32(i32,buffer,buffer,buffer,buffer)", 0, rd, wr, ex, tv)
         if(rc < 0) { return {"readable":false,"writable":false,"error":true,"hangup":false} }
         rdg := ffi_bytes(rd)
         wrg := ffi_bytes(wr)
@@ -189,41 +209,58 @@ struct(socket) {
 
     private fn(winsock_poll(items, timeout_ms)) {
         n := items.size()
-        arr := []
-        arr.push(n % 256); arr.push(((n - (n % 256)) / 256).to_int() % 256); arr.push(0); arr.push(0)
-        arr.push(0); arr.push(0); arr.push(0); arr.push(0)
+        if(n > 64) {
+            return {"ok":false,"results":[],"error":"socket.poll supports at most 64 handles on Windows","error_code":"invalid_argument"}
+        }
+        ra := []
+        ra.push(n % 256); ra.push(((n - (n % 256)) / 256).to_int() % 256); ra.push(0); ra.push(0)
+        ra.push(0); ra.push(0); ra.push(0); ra.push(0)
+        wa := []
+        wa.push(n % 256); wa.push(((n - (n % 256)) / 256).to_int() % 256); wa.push(0); wa.push(0)
+        wa.push(0); wa.push(0); wa.push(0); wa.push(0)
         for(it : items) {
-            le := this.le32(it.fd)
-            arr.push(le[0]); arr.push(le[1]); arr.push(le[2]); arr.push(le[3])
-            arr.push(0); arr.push(0); arr.push(0); arr.push(0)
+            le := this.le64(it.fd)
+            ra.push(le[0]); ra.push(le[1]); ra.push(le[2]); ra.push(le[3])
+            ra.push(le[4]); ra.push(le[5]); ra.push(le[6]); ra.push(le[7])
+            wa.push(le[0]); wa.push(le[1]); wa.push(le[2]); wa.push(le[3])
+            wa.push(le[4]); wa.push(le[5]); wa.push(le[6]); wa.push(le[7])
         }
         i := 0
-        while(i < 520 - 8 - n * 8) { arr.push(0); i += 1 }
-        rd := ffi_buffer(bytes(arr))
-        wr := ffi_buffer(this.zeros(520))
+        while(i < 520 - 8 - n * 8) { ra.push(0); wa.push(0); i += 1 }
+        rd := ffi_buffer(bytes(ra))
+        wr := ffi_buffer(bytes(wa))
+        ex := ffi_buffer(this.zeros(520))
         tv := ffi_buffer(this.timeval_bytes(timeout_ms))
-        rc := ffi_call(this.lib(), "select", "i32(i32,buffer,buffer,buffer,buffer)", 0, rd, wr, rd, tv)
+        rc := ffi_call(this.lib(), "select", "i32(i32,buffer,buffer,buffer,buffer)", 0, rd, wr, ex, tv)
         if(rc < 0) {
             em := "poll failed (native " + this.native_err().to_string() + ")"
             return {"ok":false,"results":[],"error":em,"error_code":"socket_error"}
         }
-        got := ffi_bytes(rd)
+        rset := this.compacted_fds(rd)
+        wset := this.compacted_fds(wr)
+        results := []
+        for(it : items) {
+            readable := false
+            writable := false
+            for(r : rset) { if(r == it.fd) { readable = true } }
+            for(w : wset) { if(w == it.fd) { writable = true } }
+            results.push({"handle":it,"readable":readable,"writable":writable,"error":false,"hangup":false})
+        }
+        return {"ok":true,"results":results,"error":"","error_code":""}
+    }
+
+    private fn(compacted_fds(buf)) {
+        got := ffi_bytes(buf)
         cnt := got[0].to_int() + got[1].to_int() * 256 + got[2].to_int() * 65536 + got[3].to_int() * 16777216
-        ready := []
+        out := []
         j := 0
         while(j < cnt) {
             base := 8 + j * 8
             fv := got[base].to_int() + got[base + 1].to_int() * 256 + got[base + 2].to_int() * 65536 + got[base + 3].to_int() * 16777216
-            ready.push(fv)
+            out.push(fv)
             j += 1
         }
-        results := []
-        for(it : items) {
-            readable := false
-            for(r : ready) { if(r == it.fd) { readable = true } }
-            results.push({"handle":it,"readable":readable,"writable":false,"error":false,"hangup":false})
-        }
-        return {"ok":true,"results":results,"error":"","error_code":""}
+        return out
     }
 
     private fn(pollfd_result(fd, timeout, events)) {
@@ -243,15 +280,10 @@ struct(socket) {
             seq.push(0); seq.push(0)
         }
         pf := ffi_buffer(bytes(seq))
-        sq := ""
-        for(x : seq) { sq = sq + x.to_string() + "," }
-        sym := "poll"
-        if(os() == "windows") { sym = "WSAPoll" }
-        rc := ffi_call(this.lib(), sym, "i32(buffer,i64,i32)", pf, 1, timeout)
+        rc := ffi_call(this.lib(), "poll", "i32(buffer,i64,i32)", pf, 1, timeout)
         if(rc < 0) { return {"readable":false,"writable":false,"error":true,"hangup":false} }
         got := ffi_bytes(pf)
         rv := got[6].to_int() + got[7].to_int() * 256
-        if(os() == "windows") { rv = got[10].to_int() + got[11].to_int() * 256 }
         return {"readable":this.bit(rv,1),"writable":this.bit(rv,4),"error":this.bit(rv,8),"hangup":this.bit(rv,16)}
     }
 
@@ -382,13 +414,22 @@ struct(socket) {
         }
         fd := ffi_call(l, "socket", "i64(i32,i32,i32)", 2, 1, 0)
         if(fd < 0) { return {"ok":false,"conn":null,"error":"socket creation failed","error_code":"socket_error"} }
+        this.nonblock_native(fd)
         sa := ffi_buffer(this.sockaddr4(host, port))
         c := ffi_call(l, "connect", "i32(i64,buffer,i64)", fd, sa, 16)
         if(c != 0) {
-            this.close_native(fd)
-            return {"ok":false,"conn":null,"error":"connection failed","error_code":"connection_refused"}
+            timeout := 30000
+            if(type(opts) == "object" && opts.has("timeout")) { timeout = opts.timeout }
+            pr := this.pollfd_result(fd, timeout, 4)
+            if(!pr.writable && !pr.error && !pr.hangup) {
+                this.close_native(fd)
+                return {"ok":false,"conn":null,"error":"connection timed out","error_code":"connection_refused"}
+            }
+            if(this.socket_error(fd) != 0) {
+                this.close_native(fd)
+                return {"ok":false,"conn":null,"error":"connection failed","error_code":"connection_refused"}
+            }
         }
-        this.nonblock_native(fd)
         return {"ok":true,"conn":this.handle("conn", fd),"error":"","error_code":""}
     }
 
@@ -492,24 +533,13 @@ struct(socket) {
         }
         seq := []
         for(it : items) {
-            if(os() == "windows") {
-                le := this.le32(it.fd)
-                seq.push(le[0]); seq.push(le[1]); seq.push(le[2]); seq.push(le[3])
-                seq.push(0); seq.push(0); seq.push(0); seq.push(0)
-                seq.push(1); seq.push(0)
-                seq.push(0); seq.push(0)
-                seq.push(0); seq.push(0); seq.push(0); seq.push(0)
-            } else {
-                le := this.le32(it.fd)
-                seq.push(le[0]); seq.push(le[1]); seq.push(le[2]); seq.push(le[3])
-                seq.push(1); seq.push(0)
-                seq.push(0); seq.push(0)
-            }
+            le := this.le32(it.fd)
+            seq.push(le[0]); seq.push(le[1]); seq.push(le[2]); seq.push(le[3])
+            seq.push(5); seq.push(0)
+            seq.push(0); seq.push(0)
         }
         buf := ffi_buffer(bytes(seq))
-        sym := "poll"
-        if(os() == "windows") { sym = "WSAPoll" }
-        rc := ffi_call(this.lib(), sym, "i32(buffer,i64,i32)", buf, n, timeout_ms)
+        rc := ffi_call(this.lib(), "poll", "i32(buffer,i64,i32)", buf, n, timeout_ms)
         if(rc < 0) {
             e := 0
             if(os() == "windows") { e = this.native_err() }
