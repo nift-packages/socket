@@ -17,6 +17,8 @@ socket_inited := false
 socket_init_ok := true
 socket_seq := 0
 socket_open := map()
+socket_recv_buf := ""
+socket_recv_buf_max := 0
 
 struct(socket) {
 
@@ -427,8 +429,16 @@ struct(socket) {
         }
         sig := "i64(i64,buffer,i64,i32)"
         if(os() == "windows") { sig = "i32(i64,buffer,i64,i32)" }
-        buf := ffi_buffer(this.zeros(max))
-        rc := ffi_call(this.lib(), "recv", sig, conn.fd, buf, max, 0)
+        // Reuse one growable receive buffer instead of building a fresh
+        // max-sized zero array per call: zeros(max) is interpreted array
+        // construction (~1us/byte), so a 64 KiB buffer cost ~65 ms per recv.
+        // The socket package is already single-threaded (shared module state),
+        // so a shared receive buffer introduces no new race.
+        if(socket_recv_buf == "" || socket_recv_buf_max < max) {
+            socket_recv_buf = ffi_buffer(this.zeros(max))
+            socket_recv_buf_max = max
+        }
+        rc := ffi_call(this.lib(), "recv", sig, conn.fd, socket_recv_buf, max, 0)
         if(rc == 0) {
             return {"ok":true,"data":bytes(),"eof":true,"would_block":false,"error":"","error_code":""}
         }
@@ -443,7 +453,7 @@ struct(socket) {
             }
             return {"ok":false,"data":null,"eof":false,"would_block":false,"error":"recv failed","error_code":"connection_reset"}
         }
-        got := ffi_bytes(buf)
+        got := ffi_bytes(socket_recv_buf)
         out := []
         i := 0
         while(i < rc) { out.push(got[i]); i += 1 }
