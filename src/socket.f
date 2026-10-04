@@ -432,8 +432,15 @@ struct(socket) {
         // Reuse one growable receive buffer instead of building a fresh
         // max-sized zero array per call: zeros(max) is interpreted array
         // construction (~1us/byte), so a 64 KiB buffer cost ~65 ms per recv.
-        // The socket package is already single-threaded (shared module state),
-        // so a shared receive buffer introduces no new race.
+        // Concurrency note: this cached ffi_buffer handle is registered in this
+        // execution context's FFI storage (a Nift Parser owns its own
+        // ffi_buffers_ map; the handle string is meaningless in any other
+        // context). The socket package is used from a single sequential event
+        // loop today, so the cache is de facto per-context and race-free. If a
+        // future worker (thread()/async clones module state but NOT the FFI
+        // buffer map) calls recv() after a parent context already recv'd, the
+        // inherited handle will not resolve here; such a worker must rebuild
+        // its own buffer (reset socket_recv_buf) rather than share this one.
         if(socket_recv_buf == "" || socket_recv_buf_max < max) {
             socket_recv_buf = ffi_buffer(this.zeros(max))
             socket_recv_buf_max = max
